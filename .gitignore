@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Never commit real secrets -- Streamlit Cloud secrets are set in the
+# dashboard (App settings -> Secrets), not in the repo.
+.streamlit/secrets.toml
+
+# Local venv, if you create one
+.venv/
+venv/

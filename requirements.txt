@@ -1,0 +1,15 @@
+streamlit
+langchain-core
+langchain-anthropic
+langchain-openai
+langchain-ollama
+pandas
+numpy
+scipy
+matplotlib
+xarray
+netCDF4
+geopandas
+shapely
+rapidfuzz
+python-dateutil
