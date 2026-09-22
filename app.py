@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from nc_data import (
     open_forecast, get_point_timeseries, build_daily_forecast_text,
     build_compact_day_summary, build_multiday_table, category_at_least,
-    find_latest_nc_file, VARIABLE_META,
+    find_latest_nc_file, ensure_nc_file, describe_directory, VARIABLE_META,
 )
 from districts import (
     load_district_gdf, build_grid_district_index, district_rainfall_table,
@@ -114,11 +114,8 @@ def get_model():
 
 @st.cache_resource
 def get_forecast():
-    path = NC_PATH or find_latest_nc_file(NC_DIR)
-    if path is None:
-        raise FileNotFoundError(
-            f"No file matching 'ecmwf_aifs_india_YYYYMMDD_00z_merged.nc' found in '{NC_DIR}'."
-        )
+    download_url = _get_secret("NC_FILE_URL")  # optional external fallback, see README
+    path = ensure_nc_file(nc_dir=NC_DIR, nc_path=NC_PATH, download_url=download_url)
     return open_forecast(path)
 
 
@@ -233,11 +230,36 @@ DEFAULT_PARSED = {
 }
 
 
+class LLMBackendError(RuntimeError):
+    """Raised when the configured LLM backend can't be reached, with an
+    actionable message for the person running the app (not a raw traceback)."""
+
+
 def parse_intent(question):
     # StrOutputParser normalizes output whether the model returns a plain
     # string (Ollama) or a chat message object (Anthropic/OpenAI).
+    provider = (_get_secret("LLM_PROVIDER", "ollama") or "ollama").lower()
     chain = intent_prompt | get_model() | StrOutputParser()
-    raw = chain.invoke({"question": question})
+    try:
+        raw = chain.invoke({"question": question})
+    except Exception as e:
+        if provider == "ollama":
+            raise LLMBackendError(
+                "Could not reach a local Ollama server (provider is currently "
+                "**'ollama'**, which only works on a machine where `ollama serve` "
+                "is actually running -- it will never work on Streamlit Community "
+                "Cloud or similar hosts).\n\n"
+                "**Fix:** in this app's Streamlit Cloud secrets (App settings -> "
+                "Secrets), add:\n```toml\nLLM_PROVIDER = \"anthropic\"\n"
+                "ANTHROPIC_API_KEY = \"sk-ant-your-real-key\"\n```\n"
+                "then reboot the app from the Streamlit Cloud dashboard so it "
+                "picks up the new secrets."
+            ) from e
+        raise LLMBackendError(
+            f"Could not reach the '{provider}' LLM backend: {e}\n\n"
+            "Check that the matching API key secret is set correctly and that "
+            "your account has access to the model, then reboot the app."
+        ) from e
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
         return dict(DEFAULT_PARSED)
@@ -495,14 +517,27 @@ st.caption(
 )
 
 with st.sidebar:
+    st.markdown("**Assistant brain**")
+    _active_provider = (_get_secret("LLM_PROVIDER", "ollama") or "ollama").lower()
+    if _active_provider == "ollama":
+        st.warning(
+            "LLM_PROVIDER = 'ollama' (default). This only works if a local "
+            "Ollama server is running on THIS machine -- it will always fail "
+            "on Streamlit Community Cloud. Set LLM_PROVIDER + an API key "
+            "under App settings -> Secrets to fix."
+        )
+    else:
+        st.caption(f"Provider: {_active_provider}")
+
     st.markdown("**Forecast source**")
     try:
         ds = get_forecast()
-        #st.caption(f"File: {ds.attrs.get('nc_path', 'unknown')}")
+        st.caption(f"File: {ds.attrs.get('nc_path', 'unknown')}")
         st.caption(f"Model init (UTC): {ds.attrs.get('ic_utc', 'unknown')}")
         st.caption(f"Current IST time: {now_ist().strftime('%Y-%m-%d %H:%M')}")
     except Exception as e:
-        st.error(f"Could not load NetCDF file: {e}")
+        st.error("Could not load the NetCDF forecast file.")
+        st.code(str(e))
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -524,8 +559,11 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            parsed = parse_intent(question)
-            result = route(parsed)
+            try:
+                parsed = parse_intent(question)
+                result = route(parsed)
+            except LLMBackendError as e:
+                result = _result(str(e))
         st.markdown(result["text"])
         if result.get("table") is not None:
             st.dataframe(result["table"], use_container_width=True)
